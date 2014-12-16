@@ -29,10 +29,11 @@ logger = logging.getLogger('')
 class CLIHandler(lib.connection.Stream):
     terminator = '\n'.encode()
 
-    def __init__(self, smarthome, sock, source, updates):
+    def __init__(self, smarthome, sock, source, updates, call_item_allowed=True):
         lib.connection.Stream.__init__(self, sock, source)
         self.source = source
         self.updates_allowed = updates
+        self.call_item_allowed = call_item_allowed
         self.sh = smarthome
         self.push("SmartHome.py v{0}\n".format(self.sh.version))
         self.push("Enter 'help' for a list of available commands.\n")
@@ -58,20 +59,24 @@ class CLIHandler(lib.connection.Stream):
             self.cl()
         elif cmd.startswith('update ') or cmd.startswith('up '):
             self.update(cmd.lstrip('update').strip())
+        elif cmd.startswith('call_item ') or cmd.startswith('!'):
+            cmd_ = cmd.lstrip('call_item').strip()
+            cmd_ = cmd.lstrip('!').strip()
+            self.call_item(cmd_)
         elif cmd.startswith('tr'):
             self.tr(cmd.lstrip('tr').strip())
         elif cmd.startswith('rl'):
             self.rl(cmd.lstrip('rl').strip())
         elif cmd.startswith('rr'):
             self.rr(cmd.lstrip('rr').strip())
-        elif cmd == 'rt' or cmd == 'runtime':
-            self.rt()
         elif cmd == 'help' or cmd == 'h':
             self.usage()
         elif cmd in ('quit', 'q', 'exit', 'x'):
             self.push('bye\n')
             self.close()
             return
+        else:
+            self.push("syntax error.\n")
         self.push("> ")
 
     def cl(self):
@@ -84,7 +89,7 @@ class CLIHandler(lib.connection.Stream):
         else:
             item = self.sh.return_item(path)
             if hasattr(item, 'id'):
-                if item.type():
+                if item._type:
                     self.push("{0} = {1}\n".format(item.id(), item()))
                 else:
                     self.push("{}\n".format(item.id()))
@@ -96,7 +101,7 @@ class CLIHandler(lib.connection.Stream):
     def la(self):
         self.push("Items:\n======\n")
         for item in self.sh.return_items():
-            if item.type():
+            if item._type:
                 self.push("{0} = {1}\n".format(item.id(), item()))
             else:
                 self.push("{0}\n".format(item.id()))
@@ -112,10 +117,43 @@ class CLIHandler(lib.connection.Stream):
             self.push("You have to specify an item value. Syntax: up item = value\n")
             return
         item = self.sh.return_item(path)
-        if not item.type():
+        if not hasattr(item, '_type'):
             self.push("Could not find item with a valid type specified: '{0}'\n".format(path))
             return
         item(value, 'CLI', self.source)
+
+    def call_item(self, data):
+        if not self.call_item_allowed:
+            self.push("Calling items is not allowed.\n")
+            return
+
+        path, arglist = data.split('(')
+        path = path.strip()
+        arglist = arglist.strip()
+
+        # we expect sth like item.sub_item(arg) or item.sub_item.method(arg)
+        if not arglist:
+            self.push("You have to specify an item call.\n")
+            return
+        item = self.sh.return_item(path)
+        if item is None:
+            # maybe this is not a direct item call but a call to a specific method (like SQL.db())
+            path = ".".join(path.split(".")[:-1])
+            item = self.sh.return_item(path)
+        if item is None:
+            self.push("Could not find item.\n")
+            return
+        hastype = hasattr(item, '_type')
+        if not hastype:
+            self.push("Could not find item with a valid type specified.\n")
+            return
+        
+        # make the call and catch the retval (or a possible Exception) 
+        try:
+            retval = eval("self.sh." + data.strip())
+        except Exception as e:
+            retval = str(e)
+        self.push("call returned: %s\n" % retval)
 
     def tr(self, logic):
         if not self.updates_allowed:
@@ -149,7 +187,7 @@ class CLIHandler(lib.connection.Stream):
 
     def lo(self):
         self.push("Logics:\n")
-        for logic in sorted(self.sh.return_logics()):
+        for logic in self.sh.return_logics():
             nt = self.sh.scheduler.return_next(logic)
             if nt is not None:
                 self.push("{0} (scheduled for {1})\n".format(logic, nt.strftime('%Y-%m-%d %H:%M:%S%z')))
@@ -162,10 +200,6 @@ class CLIHandler(lib.connection.Stream):
         for t in threading.enumerate():
             self.push("{0}\n".format(t.name))
 
-    def rt(self):
-        # return SH.py runtime
-        self.push("Runtime: {}\n".format(self.sh.runtime()))
-
     def usage(self):
         self.push('cl: clean (memory) log\n')
         self.push('ls: list the first level items\n')
@@ -175,10 +209,11 @@ class CLIHandler(lib.connection.Stream):
         self.push('lt: list current thread names\n')
         self.push('update item = value: update the specified item with the specified value\n')
         self.push('up: alias for update\n')
+        self.push('call_item item(args): calls the specified item with the specified arguments\n')
+        self.push('!: alias for call_item\n')
         self.push('tr logic: trigger logic\n')
         self.push('rl logic: reload logic\n')
         self.push('rr logic: reload and run logic\n')
-        self.push('rt: return runtime\n')
         self.push('quit: quit the session\n')
         self.push('q: alias for quit\n')
 
